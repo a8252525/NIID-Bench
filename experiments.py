@@ -20,6 +20,7 @@ from model import *
 from utils import *
 from vggmodel import *
 from resnetcifar import *
+from DynFedProx import dynfedprox_mu, gamma_initial_grad, get_gamma
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -50,6 +51,15 @@ def get_args():
     parser.add_argument('--noise_type', type=str, default='level', help='Different level of noise or different space of noise')
     parser.add_argument('--rho', type=float, default=0, help='Parameter controlling the momentum SGD')
     parser.add_argument('--sample', type=float, default=1, help='Sample ratio for each communication round')
+
+    #parameters for dynfedprox
+    parser.add_argument('--discount_rate', type=float, default=0.8, help='')
+    parser.add_argument('--delta_epoch', type=float, default=1, help='')
+    parser.add_argument('--exponential_growth_rate', type=float, default=1.1, help='')
+    parser.add_argument('--linear_growth_rate', type=float, default=0.1, help='')
+    parser.add_argument('--prox_pattern', type=str, default='statistic', help='statistic or DynFedProx')
+
+
     args = parser.parse_args()
     return args
 
@@ -485,6 +495,82 @@ def train_net_fednova(net_id, net, global_model, train_dataloader, test_dataload
     logger.info(' ** Training complete **')
     return train_acc, test_acc, a_i, norm_grad
 
+def train_net_fednova_prox(net_id, net, global_model, train_dataloader, test_dataloader, epochs, lr, args_optimizer, mu, device="cpu"):
+    logger.info('Training network %s' % str(net_id))
+
+    train_acc = compute_accuracy(net, train_dataloader, device=device)
+    test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
+
+    logger.info('>> Pre-Training Training accuracy: {}'.format(train_acc))
+    logger.info('>> Pre-Training Test accuracy: {}'.format(test_acc))
+
+    optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, momentum=args.rho, weight_decay=args.reg)
+    criterion = nn.CrossEntropyLoss().to(device)
+
+    if type(train_dataloader) == type([1]):
+        pass
+    else:
+        train_dataloader = [train_dataloader]
+
+    #writer = SummaryWriter()
+    g_i = gamma_initial_grad(net, train_dataloader, lr, device)
+
+    tau = 0
+
+    global_weight_collector = list(global_model.to(device).parameters())
+
+    for epoch in range(epochs):
+        epoch_loss_collector = []
+        for tmp in train_dataloader:
+            for batch_idx, (x, target) in enumerate(tmp):
+                x, target = x.to(device), target.to(device)
+
+                optimizer.zero_grad()
+                x.requires_grad = True
+                target.requires_grad = False
+                target = target.long()
+
+                out = net(x)
+                loss = criterion(out, target)
+
+                #for fedprox
+                fed_prox_reg = 0.0
+                for param_index, param in enumerate(net.parameters()):
+                    fed_prox_reg += ((mu / 2) * torch.norm((param - global_weight_collector[param_index]))**2)
+                loss += fed_prox_reg
+
+                loss.backward()
+                optimizer.step()
+
+                tau = tau + 1
+
+                epoch_loss_collector.append(loss.item())
+
+
+        epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+        logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
+
+    #get gamma with trained model
+    gamma_i = get_gamma(net, train_dataloader, g_i, global_weight_collector, lr, mu, device)
+
+    # a_i = (tau - args.rho * (1 - pow(args.rho, tau)) / (1 - args.rho)) / (1 - args.rho)
+    a_i = (1-pow(1-args.lr*args.mu,tau)) / args.lr*args.mu
+    global_model_para = global_model.state_dict()
+    net_para = net.state_dict()
+    norm_grad = copy.deepcopy(global_model.state_dict())
+    for key in norm_grad:
+        #norm_grad[key] = (global_model_para[key] - net_para[key]) / a_i
+        norm_grad[key] = torch.true_divide(global_model_para[key]-net_para[key], a_i)
+    train_acc = compute_accuracy(net, train_dataloader, device=device)
+    test_acc, conf_matrix = compute_accuracy(net, test_dataloader, get_confusion_matrix=True, device=device)
+
+    logger.info('>> Training accuracy: %f' % train_acc)
+    logger.info('>> Test accuracy: %f' % test_acc)
+
+
+    logger.info(' ** Training complete **')
+    return train_acc, test_acc, a_i, norm_grad, gamma_i
+
 
 def local_train_net_scaffold(nets, selected, global_model, c_nets, c_global, args, net_dataidx_map, test_dl = None, device="cpu"):
     avg_acc = 0.0
@@ -592,6 +678,54 @@ def local_train_net_fednova(nets, selected, global_model, args, net_dataidx_map,
 
     nets_list = list(nets.values())
     return nets_list, a_list, d_list, n_list
+
+def local_train_net_fednova_prox(nets, selected, global_model, args, net_dataidx_map, test_dl = None, device="cpu"):
+    avg_acc = 0.0
+
+    a_list = []
+    d_list = []
+    n_list = []
+    gamma_list = []
+    global_model.to(device)
+    for net_id, net in nets.items():
+        if net_id not in selected:
+            continue
+        dataidxs = net_dataidx_map[net_id]
+
+        logger.info("Training network %s. n_training: %d" % (str(net_id), len(dataidxs)))
+        # move the model to cuda device:
+        net.to(device)
+
+        noise_level = args.noise
+        if net_id == args.n_parties - 1:
+            noise_level = 0
+
+        if args.noise_type == 'space':
+            train_dl_local, test_dl_local, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32, dataidxs, noise_level, net_id, args.n_parties-1)
+        else:
+            noise_level = args.noise / (args.n_parties - 1) * net_id
+            train_dl_local, test_dl_local, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32, dataidxs, noise_level)
+        train_dl_global, test_dl_global, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32)
+        n_epoch = args.epochs
+
+
+        trainacc, testacc, a_i, d_i, gamma_i = train_net_fednova_prox(net_id, net, global_model, train_dl_local, test_dl, n_epoch, args.lr, args.optimizer, args.mu, device=device)
+
+        a_list.append(a_i)
+        d_list.append(d_i)
+        gamma_list.append(gamma_i)
+        n_i = len(train_dl_local)
+        n_list.append(n_i)
+        logger.info("net %d final test acc %f" % (net_id, testacc))
+        avg_acc += testacc
+
+
+    avg_acc /= len(selected)
+    if args.alg == 'local_training':
+        logger.info("avg test acc %f" % avg_acc)
+
+    nets_list = list(nets.values())
+    return nets_list, a_list, d_list, n_list, gamma_list
 
 def get_partition_dict(dataset, partition, n_parties, init_seed=0, datadir='./data', logdir='./logs', beta=0.5):
     seed = init_seed
@@ -937,6 +1071,108 @@ if __name__ == '__main__':
             global_model.load_state_dict(updated_model)
 
 
+            logger.info('global n_training: %d' % len(train_dl_global))
+            logger.info('global n_test: %d' % len(test_dl_global))
+
+            global_model.to('cpu')
+            train_acc = compute_accuracy(global_model, train_dl_global)
+            test_acc, conf_matrix = compute_accuracy(global_model, test_dl_global, get_confusion_matrix=True)
+
+
+            logger.info('>> Global Model Train accuracy: %f' % train_acc)
+            logger.info('>> Global Model Test accuracy: %f' % test_acc)
+
+    elif args.alg == 'fednova_prox':
+        logger.info("Initializing nets")
+        nets, local_model_meta_data, layer_type = init_nets(args.net_config, args.dropout_p, args.n_parties, args)
+        global_models, global_model_meta_data, global_layer_type = init_nets(args.net_config, 0, 1, args)
+        global_model = global_models[0]
+        #variable for DynFedProx
+        stage = "init"
+        round_gamma_list = []
+
+        d_list = [copy.deepcopy(global_model.state_dict()) for i in range(args.n_parties)]
+        d_total_round = copy.deepcopy(global_model.state_dict())
+        for i in range(args.n_parties):
+            for key in d_list[i]:
+                d_list[i][key] = 0
+        for key in d_total_round:
+            d_total_round[key] = 0
+
+        data_sum = 0
+        for i in range(args.n_parties):
+            data_sum += len(traindata_cls_counts[i])
+        portion = []
+        for i in range(args.n_parties):
+            portion.append(len(traindata_cls_counts[i]) / data_sum)
+
+        global_para = global_model.state_dict()
+        if args.is_same_initial:
+            for net_id, net in nets.items():
+                net.load_state_dict(global_para)
+
+        for round in range(args.comm_round):
+            logger.info("in comm round:" + str(round))
+            
+            arr = np.arange(args.n_parties)
+            np.random.shuffle(arr)
+            selected = arr[:int(args.n_parties * args.sample)]
+
+            global_para = global_model.state_dict()
+            if round == 0:
+                if args.is_same_initial:
+                    for idx in selected:
+                        nets[idx].load_state_dict(global_para)
+            else:
+                for idx in selected:
+                    nets[idx].load_state_dict(global_para)
+
+            _, a_list, d_list, n_list, gamma_list = local_train_net_fednova_prox(nets, selected, global_model, args, net_dataidx_map, test_dl = test_dl_global, device=device)
+            total_n = sum(n_list)
+            #print("total_n:", total_n)
+            d_total_round = copy.deepcopy(global_model.state_dict())
+            for key in d_total_round:
+                d_total_round[key] = 0.0
+
+            round_gamma_list.append(sum(gamma_list)/len(gamma_list))
+            #Dynamic proximal term, tunning mu.
+            if args.prox_pattern == 'DynFedProx' and round>0:
+                dynfedprox_mu(args, stage, round_gamma_list)
+            logger.info("mu" + str(args.mu))
+            
+            for i in range(len(selected)):
+                d_para = d_list[i]
+                for key in d_para:
+                    #if d_total_round[key].type == 'torch.LongTensor':
+                    #    d_total_round[key] += (d_para[key] * n_list[i] / total_n).type(torch.LongTensor)
+                    #else:
+                    d_total_round[key] += d_para[key] * n_list[i] / total_n
+
+
+            # for i in range(len(selected)):
+            #     d_total_round = d_total_round + d_list[i] * n_list[i] / total_n
+
+            # local_train_net(nets, args, net_dataidx_map, local_split=False, device=device)
+
+            # update global model
+            coeff = 0.0
+            for i in range(len(selected)):
+                coeff = coeff + a_list[i] * n_list[i]/total_n
+
+            updated_model = global_model.state_dict()
+            for key in updated_model:
+                #print(updated_model[key])
+                if updated_model[key].type() == 'torch.LongTensor':
+                    updated_model[key] -= (coeff * d_total_round[key]).type(torch.LongTensor)
+                elif updated_model[key].type() == 'torch.cuda.LongTensor':
+                    updated_model[key] -= (coeff * d_total_round[key]).type(torch.cuda.LongTensor)
+                else:
+                    #print(updated_model[key].type())
+                    #print((coeff*d_total_round[key].type()))
+                    updated_model[key] -= coeff * d_total_round[key]
+            global_model.load_state_dict(updated_model)
+
+            logger.info('average gamma: %d' % round_gamma_list[-1])
             logger.info('global n_training: %d' % len(train_dl_global))
             logger.info('global n_test: %d' % len(test_dl_global))
 
