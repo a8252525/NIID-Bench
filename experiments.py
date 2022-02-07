@@ -554,7 +554,7 @@ def train_net_fednova_prox(net_id, net, global_model, train_dataloader, test_dat
     gamma_i = get_gamma(net, train_dataloader, g_i, global_weight_collector, lr, mu, device)
 
     # a_i = (tau - args.rho * (1 - pow(args.rho, tau)) / (1 - args.rho)) / (1 - args.rho)
-    a_i = (1-pow(1-args.lr*args.mu,tau)) / args.lr*args.mu
+    a_i = (1-pow(1-args.lr*args.mu, tau)) / (args.lr*args.mu)
     global_model_para = global_model.state_dict()
     net_para = net.state_dict()
     norm_grad = copy.deepcopy(global_model.state_dict())
@@ -1134,11 +1134,15 @@ if __name__ == '__main__':
             for key in d_total_round:
                 d_total_round[key] = 0.0
 
-            round_gamma_list.append(sum(gamma_list)/len(gamma_list))
+            average_gamma = sum(gamma_list) / len(gamma_list)
+            if len(round_gamma_list)>=1:
+                #smooth gamma vaule
+                average_gamma = 0.5 * round_gamma_list[-1] + 0.5 * average_gamma
+            round_gamma_list.append(average_gamma)
             #Dynamic proximal term, tunning mu.
             if args.prox_pattern == 'DynFedProx' and round>0:
-                dynfedprox_mu(args, stage, round_gamma_list)
-            logger.info("mu" + str(args.mu))
+                stage = dynfedprox_mu(args, stage, round_gamma_list)
+            logger.info("mu: " + str(args.mu))
             
             for i in range(len(selected)):
                 d_para = d_list[i]
@@ -1172,7 +1176,7 @@ if __name__ == '__main__':
                     updated_model[key] -= coeff * d_total_round[key]
             global_model.load_state_dict(updated_model)
 
-            logger.info('average gamma: %d' % round_gamma_list[-1])
+            logger.info('average gamma: %f' % round_gamma_list[-1])
             logger.info('global n_training: %d' % len(train_dl_global))
             logger.info('global n_test: %d' % len(test_dl_global))
 

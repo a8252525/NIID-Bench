@@ -63,7 +63,7 @@ def get_gamma(net, train_dataloader, g_i, global_weight_collector, lr, mu, devic
     h_inexa = 0
     h_wt = 0
     for indx in range(len(g_i)):
-        h_inexa += torch.sum((g_i[indx] + mu * (trained_model[indx] - global_weight_collector[indx]) )**2 ).to(torch.float)
+        h_inexa += torch.sum((inexact_g_i[indx] + mu * (trained_model[indx] - global_weight_collector[indx]) )**2 ).to(torch.float)
         h_wt += torch.sum(g_i[indx] **2)
 
     gamma = torch.sqrt(h_inexa) / torch.sqrt(h_wt)
@@ -81,7 +81,7 @@ def dynfedprox_mu(args, stage, round_gamma_list):
             args.epochs += args.delta_epoch
     
     elif stage == 'exp':
-        if round_gamma_list[-1]>=1:
+        if round_gamma_list[-1]>=1 and round_gamma_list[-2]>=1 and round_gamma_list[-3]>=1:
             stage = 'linear'
             args.mu *= args.discount_rate
             # if args.dataset == 'Shakespeare':
@@ -91,10 +91,11 @@ def dynfedprox_mu(args, stage, round_gamma_list):
         else:
             args.mu *= args.exponential_growth_rate
     elif stage == 'linear': 
-        if round_gamma_list[-1]>=1:
+        if round_gamma_list[-1]>=1 and round_gamma_list[-2]>=1 and round_gamma_list[-3]>=1:
             args.mu *= args.discount_rate
         else:
             args.mu += args.linear_growth_rate
+    return stage
 
 def list_less_than(l, value=1):
     flag = True
