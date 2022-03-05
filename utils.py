@@ -686,4 +686,16 @@ def noise_sample(choice, n_dis_c, dis_c_dim, n_con_c, n_z, batch_size, device):
 
     return noise, idx
 
+def update_local_epoch(args, net_id, selected):
+    if args.system_pattern == "constant":
+        return args.epochs
+
+    if args.system_pattern == "uniform_random":
+        # np.random.seed(2020+rank+rnd+args.seed)
+        drop = int(len(selected) * args.dropout_ratio)
+        if net_id in selected[-drop:]:
+            return np.random.randint(low=2, high=args.epochs-1, size=1)[0]
+        return args.epochs
+
+
 

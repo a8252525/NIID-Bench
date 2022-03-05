@@ -59,6 +59,13 @@ def get_args():
     parser.add_argument('--linear_growth_rate', type=float, default=0.1, help='')
     parser.add_argument('--prox_pattern', type=str, default='statistic', help='statistic or DynFedProx')
 
+    #parameters for system heterogeneity
+    parser.add_argument('--system_pattern', type=str, default='constant', help='constant or straggler')
+    # parser.add_argument('--highest_epoch', type=int, default=15, help='')
+    # parser.add_argument('--lowest_epoch', type=int, default=5, help='')
+    parser.add_argument('--dropout_ratio', type=float, default=0.3, help='')
+
+
 
     args = parser.parse_args()
     return args
@@ -513,7 +520,8 @@ def train_net_fednova_prox(net_id, net, global_model, train_dataloader, test_dat
         train_dataloader = [train_dataloader]
 
     #writer = SummaryWriter()
-    g_i = gamma_initial_grad(net, train_dataloader, lr, device)
+    if args.prox_pattern == 'DynFedProx':
+        g_i = gamma_initial_grad(net, train_dataloader, lr, device)
 
     tau = 0
 
@@ -551,7 +559,9 @@ def train_net_fednova_prox(net_id, net, global_model, train_dataloader, test_dat
         logger.info('Epoch: %d Loss: %f' % (epoch, epoch_loss))
 
     #get gamma with trained model
-    gamma_i = get_gamma(net, train_dataloader, g_i, global_weight_collector, lr, mu, device)
+    gamma_i = 0
+    if args.prox_pattern == 'DynFedProx':
+        gamma_i = get_gamma(net, train_dataloader, g_i, global_weight_collector, lr, mu, device)
 
     # a_i = (tau - args.rho * (1 - pow(args.rho, tau)) / (1 - args.rho)) / (1 - args.rho)
     a_i = (1-pow(1-args.lr*args.mu, tau)) / (args.lr*args.mu)
@@ -706,6 +716,8 @@ def local_train_net_fednova_prox(nets, selected, global_model, args, net_dataidx
             noise_level = args.noise / (args.n_parties - 1) * net_id
             train_dl_local, test_dl_local, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32, dataidxs, noise_level)
         train_dl_global, test_dl_global, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32)
+        #add system heterogeneity
+        # update_local_epoch(args, net_id, selected)
         n_epoch = args.epochs
 
 
@@ -725,6 +737,8 @@ def local_train_net_fednova_prox(nets, selected, global_model, args, net_dataidx
         logger.info("avg test acc %f" % avg_acc)
 
     nets_list = list(nets.values())
+    if args.system_pattern == 'straggler':
+        gamma_list = gamma_list[:-int(len(selected)*args.dropout_ratio)]
     return nets_list, a_list, d_list, n_list, gamma_list
 
 def get_partition_dict(dataset, partition, n_parties, init_seed=0, datadir='./data', logdir='./logs', beta=0.5):
@@ -1175,8 +1189,8 @@ if __name__ == '__main__':
                     #print((coeff*d_total_round[key].type()))
                     updated_model[key] -= coeff * d_total_round[key]
             global_model.load_state_dict(updated_model)
-
-            logger.info('average gamma: %f' % round_gamma_list[-1])
+            if args.prox_pattern == 'DynFedProx':
+                logger.info('average gamma: %f' % round_gamma_list[-1])
             logger.info('global n_training: %d' % len(train_dl_global))
             logger.info('global n_test: %d' % len(test_dl_global))
 
